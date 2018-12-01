@@ -1,146 +1,191 @@
 import requests
 import json
 
-class Lennox_iComfort_API():
+# Temperature units
+TEMP_FAHRENHEIT = 0
+TEMP_CELSIUS = 1
+
+STATE_LIST = [
+    'Idle',
+    'Heating',
+    'Cooling',
+]
+
+OPMODE_LIST = [
+    'Off',
+    'Heat only',
+    'Cool only',
+    'Heat & Cool',
+]
+
+FANMODE_LIST = [
+    'Auto',
+    'On',
+    'Circulate',
+]
+
+SERVICE_URL = "https://services.myicomfort.com/DBAcessService.svc"
+
+Endpoints = {
+    "validateUser": SERVICE_URL + "/ValidateUser",
+    "getSystems": SERVICE_URL + "/GetSystemsInfo",
+    "getThermostat": SERVICE_URL + "/GetTStatInfoList",
+    "setThermostat": SERVICE_URL + "/SetTStatInfo",
+    "getSchedule": SERVICE_URL + "/GetTStatScheduleInfo",
+    "getProgram": SERVICE_URL + "/GetProgramInfo",
+    "setAway": SERVICE_URL + "/SetAwayModeNew",
+    "setProgram": SERVICE_URL + "/SetProgramInfoNew",
+}
+
+DefaultSystem = 0
+DefaultZone = 0
+
+class LennoxiComfortAPI():
     """Representation of the Lennox iComfort thermostat sensors."""
     
-    def __init__(self, username, password, system, zone):
+    def __init__(self, username, password,
+            tempunit = TEMP_FAHRENHEIT,
+            system = DefaultSystem,
+            zone = DefaultZone):
         """Initialize the sensor."""
-        self._name = 'lennox'
+        self.name = 'lennox'
+
         self._username = username
-        self._password = password
+        self._session = requests.Session()
+        self._session.auth = (username, password)
 
-        self._system = system
-        self._zone = zone
+        self.system = system
+        self.zone = zone
+        self.tempunit = tempunit
 
-        self._serialNumber = "Unknown"
+        # Get some static information. If things like program names change,
+        # we have to restart the API (i.e., restart Home Assistant)
+        self.validateUser()
+        self.serialNumber = self.getSerial()
+        self.programList = self.getPrograms()
 
-        self._temperature = "Unknown"
-        self._humidity = "Unknown"
-        self._heatto = "Unknown"
-        self._coolto = "Unknown"
-        self._awaymode = "Unknown"
-        self._programmode = "Unknown"
-        self._tempunit = "1" #0 = F, 1 = C
-
-        self._state = "Unknown"
-        self._state_list = ['Idle', 'Heating', 'Cooling'];
-        self._program = "Unknown"
-        self._program_list = []
-        self._opmode = "Unknown"
-        self._opmode_list = ['Off', 'Heat only', 'Cool only', 'Heat & Cool']
-        self._fanmode = "Unknown"
-        self._fanmode_list = ['Auto', 'On', 'Circulate']
+        # We want values filled in
         self.get()
-    
-    def set(self):
-        #Perform our json query
-        validateUser = "ValidateUser";
-        getSystemsInfo = "GetSystemsInfo";
-        gatewaySN  = "?gatewaysn="
-        getTStatInfoList = "GetTStatInfoList";
-        setTStatInfo = "SetTStatInfo";
-        userID = "?UserId=";
-        serviceURL = "https://" + self._username + ":" + self._password + "@services.myicomfort.com/DBAcessService.svc/";
-        session_url = serviceURL + validateUser + "?UserName=" + self._username + "&TempUnit=+ " + self._tempunit;
-        s = requests.session();
-        cookies = s.get(session_url)
 
-        #form our string
-        data = {
-            'Cool_Set_Point':self._coolto, 
-            'Heat_Set_Point':self._heatto, 
-            'Fan_Mode':self._fanmode, 
-            'Operation_Mode':self._opmode, 
-            'Pref_Temp_Units':self._tempunit, 
-            'Zone_Number':self._zone, 
-            'GatewaySN':self._serialNumber}
-        
-        #now do a setTStatInfo request
-        url = serviceURL + setTStatInfo;
-        headers = {'contentType': 'application/x-www-form-urlencoded', 'requestContentType': 'application/json; charset=utf-8'}
+    def _getResponse(self, r):
+        data = r.json()
+        if (data['ReturnStatus'] != 'SUCCESS') and (data['ReturnStatus'] != "1"):
+            raise IOError("Error communicating with Lennox service")
+        return data
 
-        #do our http PUT call
-        resp2 = s.put(url, json=data, headers=headers);
-        #print resp2
+    def validateUser(self):
+        params = {'username': self._username}
+        r = self._session.put(Endpoints["validateUser"], params = params)
+
+        if r.status_code == requests.codes.ok:
+            if r.json()['msg_code'] == 'SUCCESS':
+                return
+
+        raise ValueError("Invalid username or password")
+
+    def getSerial(self):
+        params = {'userid': self._username}
+        r = self._session.get(Endpoints["getSystems"], params = params)
+        response = self._getResponse(r)
         
+        return response['Systems'][self.system]['Gateway_SN']
+
+    def getPrograms(self):
+        params = {'gatewaysn': self.serialNumber}
+        r = self._session.get(Endpoints["getSchedule"], params = params)
+        response = self._getResponse(r)
+
+        programList = []
+        for program in response['tStatScheduleInfo']:   
+            programList.insert(int(program['Schedule_Number']), program['Schedule_Name'])
+
+        return programList
+
+    # Expecting tStatInfo list
+    def update(self, infolist):
+        info = infolist[self.zone]
+
+        self.state = int(info['System_Status'])
+        self.opmode = int(info['Operation_Mode'])
+        self.fanmode = int(info['Fan_Mode'])
+        self.away = True if int(info['Away_Mode']) == 1 else False
+        self.temperature = float(info['Indoor_Temp'])
+        self.humidity = float(info['Indoor_Humidity'])
+        self.heatto = float(info['Heat_Set_Point'])
+        self.coolto = float(info['Cool_Set_Point'])
+        self.programmode = True if int(info['Program_Schedule_Mode']) == 1 else False
+        self.programselection = info['Program_Schedule_Selection']
+
     def get(self):
-        #Perform our json query
-       
-        getSystemsInfo = "GetSystemsInfo";
-        getTStatInfoList = "GetTStatInfoList";
-        getTStatScheduleInfo = "GetTStatScheduleInfo";
-        getProgramInfo = "GetProgramInfo";
-               
-        validateUser = "ValidateUser";
-        gatewaySN  = "?gatewaysn="
-        userID = "?UserId=";
-        serviceURL = "https://" + self._username + ":" + self._password + "@services.myicomfort.com/DBAcessService.svc/";
-        session_url = serviceURL + validateUser + "?UserName=" + self._username + "&TempUnit=" + self._tempunit;
-        s = requests.session();
-        cookies = s.get(session_url)
-        url = serviceURL + getSystemsInfo + userID + self._username;
-        r = s.get(url)
+        params = {
+            'gatewaysn': self.serialNumber,
+            'tempunit': self.tempunit,
+        }
+        r = self._session.get(Endpoints["getThermostat"], params = params)
+        info = self._getResponse(r)['tStatInfo']
+        self.update(info)
 
-        #fetch the requested system
-        system = r.json()["Systems"][self._system]
+    def set(self):
+        data = {
+            'Cool_Set_Point': self.coolto,
+            'Heat_Set_Point': self.heatto,
+            'Fan_Mode': self.fanmode,
+            'Operation_Mode': self.opmode,
+            'Pref_Temp_Units': self.tempunit,
+            'GatewaySN': self.serialNumber,
+            'Zone_Number': self.zone,
+        }
 
-        #fetch our system serial number
-        self._serialNumber = system["Gateway_SN"];
+        r = self._session.put(Endpoints["setThermostat"], json = data)
+        if r.text != '0':
+            raise IOError("Error setting new values through Lennox service")
 
-        #now do a getTStatInfoList request
-        url = serviceURL + getTStatInfoList + gatewaySN + self._serialNumber + "&TempUnit=" + self._tempunit;
-        resp = s.get(url);
+    def setTemperature(self, low = -1, hi = -1):
+        self.heatto = low if low > 0 else self.heatto
+        self.coolto = hi if hi > 0 else self.cooto
+        self.set()
 
-        #fetch the stats for the requested zone
-        statInfo = resp.json()['tStatInfo'][self._zone];
+    def setFan(self, fanmode):
+        self.fanmode = fanmode
+        self.set()
 
-        #get our status
-        self._state = int(statInfo['System_Status']);
+    def setAway(self, away):
+        self.away = away
+        params = {
+            'gatewaysn': self.serialNumber,
+            'zonenumber': self.zone,
+            'awaymode': '1' if self.away else '0',
+            'tempscale': self.tempunit,
+        }
 
-        #get our operation mode
-        self._opmode = int(statInfo['Operation_Mode']);
-        #print "_opmode: " + str(self._opmode)
+        r = self._session.put(Endpoints["setAway"], params = params)
+        info = self._getResponse(r)['tStatInfo']
+        self.update(info)
         
-        #get our fan mode
-        self._fanmode = int(statInfo['Fan_Mode']);
-                
-        #get our away mode
-        self._awaymode = int(statInfo['Away_Mode']);
-        
-        #get our indoor temperature
-        self._temperature = float(statInfo['Indoor_Temp']);
+    # Will set manual, and then mode. Mode 0 is off.
+    def setMode(self, mode):
+        self.setManual()
+        self.opmode = mode
+        self.set()
 
-        #get our indoor humidity
-        self._humidity = float(statInfo['Indoor_Humidity']);
+    def setManual(self):
+        return self.setProgram(-1)
 
-        #get our heat to temperature
-        self._heatto = float(statInfo['Heat_Set_Point']);
-        
-        #get our cool to temperature
-        self._coolto = float(statInfo['Cool_Set_Point']);
-        
-        #get our program mode
-        self._programmode = int(statInfo['Program_Schedule_Mode'])
-        #print "Program Mode: " + str(self._programmode)
-        
-        #get our selected program
-        self._programselection = statInfo['Program_Schedule_Selection']
-        #print "Program Selection: " + str(self._programselection)
+    # -1 is manual
+    def setProgram(self, program):
+        if program == -1:
+            self.programmode = False
+        else:
+            self.programmode = True
+            self.programselection = program
 
-        #get the available programs
-        self._program_list = []
-        url = serviceURL + getTStatScheduleInfo + gatewaySN + self._serialNumber;
-        resp = s.get(url);
-
-        for program in resp.json()['tStatScheduleInfo']:   
-            #print str(program['Schedule_Number']) + ": " + str(program['Schedule_Name'])
-            self._program_list.insert(int(program['Schedule_Number']), program['Schedule_Name'])
-
-        if self._programmode == 1:
-            #print "Program Mode is ON"
-            url = serviceURL + getProgramInfo + gatewaySN + self._serialNumber + "?ScheduleNum=" + str(self._programselection) + "&TempUnit=" + self._tempunit;
-            resp = s.get(url);
-            #print resp
-            #print resp.json()
-        
+        data = {
+            'Pref_Temp_Units': self.tempunit,
+            'Zone_Number': self.zone,
+            'GatewaySN': self.serialNumber,
+            'Program_Schedule_Mode': '1' if self.programmode else '0',
+            'Program_Schedule_Selection': self.programselection,
+        }
+        r = self._session.put(Endpoints["setProgram"], json = data)
+        info = self._getResponse(r)['tStatInfo']
+        self.update(info)
