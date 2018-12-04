@@ -28,7 +28,7 @@ from homeassistant.const import (
 from lennox_api import (
     LennoxIComfortAPI,
     LENNOX_FAHRENHEIT, LENNOX_CELSIUS,
-    LENNOX_STATE_IDLE, LENNOX_STATE_HEATING, LENNOX_STATE_COOLING,
+    LENNOX_STATE_IDLE, LENNOX_STATE_HEATING, LENNOX_STATE_COOLING, LENNOX_STATE_WAITING,
     LENNOX_ON, LENNOX_OFF,
     LENNOX_HEAT, LENNOX_COOL, LENNOX_AUTO, LENNOX_CIRCULATE,
 )
@@ -46,6 +46,7 @@ MAP_STATE = {
     STATE_IDLE: LENNOX_STATE_IDLE,
     STATE_HEAT: LENNOX_STATE_HEATING,
     STATE_COOL: LENNOX_STATE_COOLING,
+    STATE_UNKNOWN: LENNOX_STATE_WAITING,
 }
 MAP_LENNOX_STATE = {value: key for key, value in MAP_STATE.items()}
 
@@ -83,23 +84,22 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
 
 def setup_platform(hass, config, add_entities, discovery_info=None):
         """Setup Lennox devices."""
-        _LOGGER.info("Initializing Lennox API for system %d, zone %d, with temperature unit %s.",
-            system, zone, hass.config.units.temperature_unit)
 
         username = config.get(CONF_USERNAME)
         password = config.get(CONF_PASSWORD)
         system = config.get(CONF_SYSTEM)
         zone = config.get(CONF_ZONE)
         unit = MAP_UNIT[hass.config.units.temperature_unit]
+        _LOGGER.info("Initializing Lennox API for system %d, zone %d with temperatre unit %s",
+            system, zone, hass.config.units.temperature_unit)
 
         """Setup the api"""
-        api = lennox_api.LennoxiComfortAPI(username, password, unit, system, zone)
+        api = LennoxIComfortAPI(username, password, unit, system, zone)
         climate = [LennoxClimate(config.get(CONF_NAME), api)]
         add_entities(climate)
 
 class LennoxClimate(ClimateDevice):
     """Representation of the Lennox iComfort WiFi thermostat."""
-
 
     def __init__(self, name, api):
         """Initialize the climate device."""
@@ -131,12 +131,12 @@ class LennoxClimate(ClimateDevice):
     def state(self):
         if self._api.opmode == LENNOX_OFF:
             return STATE_OFF
-        return MAP_LENNOX_STATE(self._api.state)
+        return MAP_LENNOX_STATE[self._api.state]
             
     @property
     def temperature_unit(self):
         """Return the unit of measurement."""
-        return MAP_LENNOX_UNIT(self._api.tempunit)
+        return MAP_LENNOX_UNIT[self._api.tempunit]
 
     @property
     def current_temperature(self):
@@ -180,7 +180,7 @@ class LennoxClimate(ClimateDevice):
     @property
     def operation_list(self):
         """Return the list of available operation modes."""
-        return MAP_OPMODE.keys()
+        return list(MAP_OPMODE.keys())
 
     @property
     def is_away_mode_on(self):
@@ -200,7 +200,7 @@ class LennoxClimate(ClimateDevice):
     @property
     def fan_list(self):
         """Return the list of available fan modes."""
-        return MAP_FANMODE.keys()
+        return list(MAP_FANMODE.keys())
 
     def update(self):
         """Get the latest data for the states."""
@@ -216,12 +216,12 @@ class LennoxClimate(ClimateDevice):
         temp = kwargs.get(ATTR_TEMPERATURE)
 
         if self._api.opmode == LENNOX_AUTO and temp_low is not None and temp_high is not None:
-            self._api.temperature = (temp_low, temp_high)
+            self._api.target_temperature = (temp_low, temp_high)
         elif temp is not None:
             if self._api.opmode == LENNOX_HEAT:
-                self._api.temperature = (temp, temp + 10)
+                self._api.target_temperature = (temp, temp + 10)
             elif self._api.opmode == LENNOX_COOL:
-                self._api.temperature = (temp - 10, temp)
+                self._api.target_temperature = (temp - 10, temp)
 
         self.schedule_update_ha_state()
 
