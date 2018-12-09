@@ -1,3 +1,7 @@
+"""
+API implementation for Lennox iComfort WiFi thermostat
+"""
+
 import requests
 import json
 
@@ -6,55 +10,40 @@ LENNOX_FAHRENHEIT = 0
 LENNOX_CELSIUS = 1
 
 # Thermostat state
-LENNOX_STATE_IDLE = 'Idle'
-LENNOX_STATE_HEATING = 'Heating'
-LENNOX_STATE_COOLING = 'Cooling'
-LENNOX_STATE_WAITING = 'Waiting'
-
-LENNOX_STATE_LIST = [
-    LENNOX_STATE_IDLE,
-    LENNOX_STATE_HEATING,
-    LENNOX_STATE_COOLING,
-    LENNOX_STATE_WAITING,
-]
+LENNOX_STATE_IDLE = 0
+LENNOX_STATE_HEATING = 1
+LENNOX_STATE_COOLING = 2
+LENNOX_STATE_WAITING = 3
+LENNOX_STATE_EMERGENCY = 4
 
 # Thermostat operations
-LENNOX_OFF = 'Off'
-LENNOX_HEAT = 'Heat only'
-LENNOX_COOL = 'Cool only'
-LENNOX_AUTO = 'Heat or cool'
-
-LENNOX_OPMODE_LIST = [
-    LENNOX_OFF,
-    LENNOX_HEAT,
-    LENNOX_COOL,
-    LENNOX_AUTO,
-]
+LENNOX_OPMODE_OFF = 0
+LENNOX_OPMODE_HEAT = 1
+LENNOX_OPMODE_COOL = 2
+LENNOX_OPMODE_AUTO = 3
+LENNOX_OPMODE_EMERGENCY = 4
 
 # Fan modes
-LENNOX_ON = 'On'
-LENNOX_CIRCULATE = 'Circulate'
-
-LENNOX_FANMODE_LIST = [
-    LENNOX_AUTO,
-    LENNOX_ON,
-    LENNOX_CIRCULATE,
-]
+LENNOX_FAN_AUTO = 0
+LENNOX_FAN_ON = 1
+LENNOX_FAN_CIRCULATE = 2
 
 # For encapsulating in program mode
-LENNOX_MANUAL = 'Manual'
+LENNOX_MANUAL = -1
+LENNOX_MANUAL_STRING = 'Manual'
 
 SERVICE_URL = "https://services.myicomfort.com/DBAcessService.svc"
 
 Endpoints = {
-    "validateUser": SERVICE_URL + "/ValidateUser",
-    "getSystems": SERVICE_URL + "/GetSystemsInfo",
-    "getThermostat": SERVICE_URL + "/GetTStatInfoList",
-    "setThermostat": SERVICE_URL + "/SetTStatInfo",
-    "getSchedule": SERVICE_URL + "/GetTStatScheduleInfo",
-    "getProgram": SERVICE_URL + "/GetProgramInfo",
-    "setAway": SERVICE_URL + "/SetAwayModeNew",
-    "setProgram": SERVICE_URL + "/SetProgramInfoNew",
+    'validateUser': SERVICE_URL + '/ValidateUser',
+    'getStrings': SERVICE_URL + '/GetTstatLookupInfo',
+    'getSystems': SERVICE_URL + '/GetSystemsInfo',
+    'getThermostat': SERVICE_URL + '/GetTStatInfoList',
+    'setThermostat': SERVICE_URL + '/SetTStatInfo',
+    'getSchedule': SERVICE_URL + '/GetTStatScheduleInfo',
+    'getProgram': SERVICE_URL + '/GetProgramInfo',
+    'setAway': SERVICE_URL + '/SetAwayModeNew',
+    'setProgram': SERVICE_URL + '/SetProgramInfoNew',
 }
 
 DEFAULT_SYSTEM = 0
@@ -79,8 +68,11 @@ class LennoxIComfortAPI():
         # Get some static information. If things like program names change,
         # we have to restart the API (i.e., restart Home Assistant)
         self.validateUser()
-        self.serialNumber = self.getSerial()
-        self.programList = self.getPrograms()
+        self.serialNumber, self.name = self.getSystemInfo()
+        self._programString = self.getProgramString()
+        self._opmodeString = self.getStrings('Operation_Mode')
+        self._stateString = self.getStrings('System_Status')
+        self._fanmodeString = self.getStrings('Fan_Mode')
 
         # We want values filled in
         self.poll()
@@ -93,7 +85,7 @@ class LennoxIComfortAPI():
 
     def validateUser(self):
         params = {'username': self._username}
-        r = self._session.put(Endpoints["validateUser"], params = params)
+        r = self._session.put(Endpoints['validateUser'], params = params)
 
         if r.status_code == requests.codes.ok:
             if r.json()['msg_code'] == 'SUCCESS':
@@ -101,16 +93,16 @@ class LennoxIComfortAPI():
 
         raise ValueError("Invalid username or password")
 
-    def getSerial(self):
+    def getSystemInfo(self):
         params = {'userid': self._username}
-        r = self._session.get(Endpoints["getSystems"], params = params)
-        response = self._getResponse(r)
+        r = self._session.get(Endpoints['getSystems'], params = params)
+        system = self._getResponse(r)['Systems'][self.system]
         
-        return response['Systems'][self.system]['Gateway_SN']
+        return (system['Gateway_SN'], system['System_Name'])
 
-    def getPrograms(self):
+    def getProgramString(self):
         params = {'gatewaysn': self.serialNumber}
-        r = self._session.get(Endpoints["getSchedule"], params = params)
+        r = self._session.get(Endpoints['getSchedule'], params = params)
         response = self._getResponse(r)
 
         programList = []
@@ -118,6 +110,19 @@ class LennoxIComfortAPI():
             programList.insert(int(program['Schedule_Number']), program['Schedule_Name'])
 
         return programList
+
+    def getStrings(self, kind):
+        params = {
+            'name': kind,
+            'langnumber': 0,
+        }
+        r = self._session.get(Endpoints['getStrings'], params = params)
+        strings = self._getResponse(r)['tStatlookupInfo']
+        stringMap = {}
+        for string in strings:
+            stringMap[string['value']] = string['description']
+
+        return stringMap
 
     # Expecting tStatInfo list
     def update(self, infolist):
@@ -139,7 +144,7 @@ class LennoxIComfortAPI():
             'gatewaysn': self.serialNumber,
             'tempunit': self.tempunit,
         }
-        r = self._session.get(Endpoints["getThermostat"], params = params)
+        r = self._session.get(Endpoints['getThermostat'], params = params)
         info = self._getResponse(r)['tStatInfo']
         self.update(info)
 
@@ -154,7 +159,7 @@ class LennoxIComfortAPI():
             'Zone_Number': self.zone,
         }
 
-        r = self._session.put(Endpoints["setThermostat"], json = data)
+        r = self._session.put(Endpoints['setThermostat'], json = data)
         if r.text != '0':
             raise IOError("Error setting new values through Lennox service")
 
@@ -166,7 +171,7 @@ class LennoxIComfortAPI():
             'tempscale': self.tempunit,
         }
 
-        r = self._session.put(Endpoints["setAway"], params = params)
+        r = self._session.put(Endpoints['setAway'], params = params)
         info = self._getResponse(r)['tStatInfo']
         self.update(info)
 
@@ -178,33 +183,45 @@ class LennoxIComfortAPI():
             'Program_Schedule_Mode': self._programmode,
             'Program_Schedule_Selection': self._programselection,
         }
-        r = self._session.put(Endpoints["setProgram"], json = data)
+        r = self._session.put(Endpoints['setProgram'], json = data)
         info = self._getResponse(r)['tStatInfo']
         self.update(info)
 
     @property
     def state(self):
-        return LENNOX_STATE_LIST[self._state]
+        return self._state
+
+    @property
+    def stateString(self):
+        return self._stateString[self._state]
 
     @property
     def opmode(self):
-        return LENNOX_OPMODE_LIST[self._opmode]
+        return self._opmode
+
+    @property
+    def opmodeString(self):
+        return self._opmodeString[self._opmode]
 
     @opmode.setter
     def opmode(self, val):
         # Will set manual, and then mode. Mode 0 is off.
         self._programmode = 0
         self.setProgram()
-        self._opmode = LENNOX_OPMODE_LIST.index(val)
+        self._opmode = val
         self.set()
 
     @property
     def fanmode(self):
-        return LENNOX_FANMODE_LIST[self._fanmode]
+        return self._fanmode
+
+    @property
+    def fanmodeString(self):
+        return self._fanmodeString[self._fanmode]
 
     @fanmode.setter
     def fanmode(self, val):
-        self._fanmode = LENNOX_FANMODE_LIST.index(val)
+        self._fanmode = val
         self.set()
 
     @property
@@ -237,8 +254,13 @@ class LennoxIComfortAPI():
     def program(self):
         if self._programmode == 0:
             return LENNOX_MANUAL
+        return self._programselection
 
-        return self.programList[self._programselection]
+    @property
+    def programString(self):
+        if self._programmode == 0:
+            return LENNOX_MANUAL_STRING
+        return self._programString[self._programmode]
 
     @program.setter
     def program(self, val):
@@ -246,5 +268,5 @@ class LennoxIComfortAPI():
             self._programmode = 0
         else:
             self._programmode = 1
-            self._programselection = self.programList.index(val)
+            self._programselection = val
         self.setProgram()
